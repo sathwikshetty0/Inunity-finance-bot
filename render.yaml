@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: expense-reimbursement-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.10
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SHEET_ID
+        sync: false
+      - key: DRIVE_FOLDER_ID
+        sync: false
+      - key: ADMIN_TELEGRAM_IDS
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: AI_CHECK_ENABLED
+        value: "false"
+      - key: NVIDIA_MODEL
+        value: meta/llama-3.2-11b-vision-instruct
+      - key: NOTIFY_ADMINS
+        value: "true"
