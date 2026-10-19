@@ -27,54 +27,69 @@ DATA_HEADERS = [
     "AI Notes",
     "Status",
     "Admin Remarks",
+    "Flow Type",
+    "Program Name",
 ]
 
 DEFAULTS = {
     "departments": [
-        "Education-Institutions",
-        "Marketing & Sales",
-        "Community Engagement/Start Up Studio",
+        "Education",
+        "Community Engagement",
+        "Startup Studio",
         "Tech Platform",
+        "Marketing",
+        "Sales",
         "HR",
         "Finance",
         "Admin",
     ],
     "expense_types": [
-        "Travelling Expense",
-        "Accommodation Expense",
-        "Printing Expense",
+        "Travelling Charges",
+        "Accommodation Charges",
         "Purchases",
-        "Courier Charges",
+        "Subscription Charges(Tech)",
+        "Subscription Charges(Office)",
+        "Subscription Charges(Marketing)",
+        "Employee Benefit Expenses",
+        "Employee Engagement Expenses",
+        "Hiring Charges",
+        "L&D Charges",
+        "Printing Charges",
+        "Stationery Charges",
         "Office Expenses",
-        "Employee Benefits/HR Cost",
-        "Technology Cost",
-        "Branding & Marketing",
-        "Other",
     ],
-    "projects": [
-        "VVCE Mysore",
-        "SKIT Bangalore",
-        "KSIT Bangalore",
-        "Chanakya University Bangalore",
-        "PES College Mandya",
-        "GMIT Mandya",
-        "SSSE Tumkur",
-        "DIM- TITAN",
-        "UDAL",
-        "BOLPU",
-        "Nagpur Next",
-        "Sristi MAHE",
-        "Employee Benefits/HR Cost",
-        "Inpulse(Tech)",
-        "Acharya Institute",
-        "Beary's(BIT)",
-        "YIT",
-        "Sales/Business Development",
-        "CIVIC",
-        "Short term Program",
-        "Community Engagement",
-        "Other",
+}
+
+DEFAULT_PROGRAMS = {
+    "Education": [
+        "Mindset Program",
+        "Innovation Week",
+        "Workshop",
+        "Tech Courses",
+        "Bridge Course",
+        "FDP",
+        "Short term Programs",
+        "Others",
     ],
+    "Community Engagement": ["Problem Statement Scouting", "Events"],
+    "Startup Studio": ["Pre Incubation", "Incubation"],
+    "Tech Platform": [
+        "INPULSE ERP",
+        "INPULSE CONTEST",
+        "INPULSE LMS",
+        "INPULSE RECRUIT",
+    ],
+    "Marketing": [
+        "Marketing Collaterals",
+        "Marketing Travel",
+        "Marketing Subscriptions",
+        "Marketing Campaigns/Events",
+    ],
+}
+
+DEFAULT_PROJECTS = {
+    "Mindset Program": ["VVCE", "SKIT", "SSSE", "KSIT", "SSIT", "Acharya Institute", "GMIT"],
+    "Events": ["TITAN Makeathons"],
 }
 
 
@@ -83,7 +98,7 @@ class SheetsService:
         credentials = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
         self._service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
         self.sheet_id = sheet_id
-        self._config_cache: tuple[float, dict[str, list[str]]] | None = None
+        self._config_cache: tuple[float, dict[str, Any]] | None = None
         self._submission_ids: set[str] | None = None
 
     def get_user(self, telegram_id: int) -> dict[str, str] | None:
@@ -105,27 +120,58 @@ class SheetsService:
                 }
         return None
 
-    def get_config(self) -> dict[str, list[str]]:
+    def get_config(self) -> dict[str, Any]:
         now = time.monotonic()
-        if self._config_cache and now - self._config_cache[0] < 600:
+        if self._config_cache and now - self._config_cache[0] < 60:
             return self._config_cache[1]
 
         response = (
             self._service.spreadsheets()
             .values()
-            .get(spreadsheetId=self.sheet_id, range="'Config'!A2:B")
+            .get(spreadsheetId=self.sheet_id, range="'Config'!A2:C")
             .execute()
         )
-        values = {key: list(items) for key, items in DEFAULTS.items()}
-        found: dict[str, list[str]] = {key: [] for key in DEFAULTS}
+        values: dict[str, Any] = {
+            "departments": list(DEFAULTS["departments"]),
+            "expense_types": list(DEFAULTS["expense_types"]),
+            "programs": {
+                department: list(programs)
+                for department, programs in DEFAULT_PROGRAMS.items()
+            },
+            "projects": {
+                program: list(projects)
+                for program, projects in DEFAULT_PROJECTS.items()
+            },
+        }
+        found_departments: list[str] = []
+        found_expense_types: list[str] = []
+        found_programs: list[tuple[str, str]] = []
+        found_projects: list[tuple[str, str]] = []
         for row in response.get("values", []):
             if len(row) >= 2:
                 category, value = row[0].strip().lower(), row[1].strip()
-                if category in found and value:
-                    found[category].append(value)
-        for category, items in found.items():
-            if items:
-                values[category] = items
+                parent = row[2].strip() if len(row) >= 3 else ""
+                if category in {"department", "departments"} and value:
+                    found_departments.append(value)
+                elif category in {"expense_type", "expense_types"} and value:
+                    found_expense_types.append(value)
+                elif category in {"program", "programs"} and value and parent:
+                    found_programs.append((parent, value))
+                elif category in {"project", "projects"} and value and parent:
+                    found_projects.append((parent, value))
+
+        if found_departments:
+            values["departments"] = found_departments
+        if found_expense_types:
+            values["expense_types"] = found_expense_types
+        if found_programs:
+            values["programs"] = {}
+            for department, program in found_programs:
+                values["programs"].setdefault(department, []).append(program)
+        if found_projects:
+            values["projects"] = {}
+            for program, project in found_projects:
+                values["projects"].setdefault(program, []).append(project)
         self._config_cache = (now, values)
         return values
 
@@ -150,7 +196,7 @@ class SheetsService:
             .values()
             .append(
                 spreadsheetId=self.sheet_id,
-                range="'Data'!A:R",
+                range="'Data'!A:T",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row]},
@@ -165,7 +211,7 @@ class SheetsService:
         response = (
             self._service.spreadsheets()
             .values()
-            .get(spreadsheetId=self.sheet_id, range="'Data'!A2:R")
+            .get(spreadsheetId=self.sheet_id, range="'Data'!A2:T")
             .execute()
         )
         rows = response.get("values", [])
@@ -193,7 +239,7 @@ class SheetsService:
         response = (
             self._service.spreadsheets()
             .values()
-            .get(spreadsheetId=self.sheet_id, range="'Data'!A2:R")
+            .get(spreadsheetId=self.sheet_id, range="'Data'!A2:T")
             .execute()
         )
         rows = [
@@ -227,11 +273,13 @@ class SheetsService:
         response = (
             self._service.spreadsheets()
             .values()
-            .get(spreadsheetId=self.sheet_id, range="'Data'!A2:R")
+            .get(spreadsheetId=self.sheet_id, range="'Data'!A2:S")
             .execute()
         )
         return {
             row[4].strip()
             for row in response.get("values", [])
-            if len(row) >= 6 and row[5].strip() == month
+            if len(row) >= 6
+            and row[5].strip() == month
+            and (len(row) <= 18 or row[18].strip() != "Direct Payment Flow")
         }

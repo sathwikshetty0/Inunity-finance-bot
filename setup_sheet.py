@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-from app.sheets_service import DATA_HEADERS, DEFAULTS
+from app.sheets_service import (
+    DATA_HEADERS,
+    DEFAULTS,
+    DEFAULT_PROGRAMS,
+    DEFAULT_PROJECTS,
+)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 TAB_NAMES = ["Data", "Users", "Config", "Dashboard"]
@@ -289,10 +294,23 @@ def main() -> None:
 
     _update_values(service, sheet_id, "'Data'!A1", [DATA_HEADERS])
     _update_values(service, sheet_id, "'Users'!A1", [["telegram_id", "name", "email", "default_department", "active"]])
-    config_rows = [["Category", "Value"]]
-    for category, values in DEFAULTS.items():
-        config_rows.extend([[category, value] for value in values])
-    _update_values(service, sheet_id, "'Config'!A1", config_rows)
+    existing_config = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=sheet_id, range="'Config'!A1:C")
+        .execute()
+        .get("values", [])
+    )
+    _update_values(service, sheet_id, "'Config'!A1:C1", [["Category", "Value", "Parent"]])
+    if not any(any(str(value).strip() for value in row) for row in existing_config[1:]):
+        config_rows = [["Category", "Value", "Parent"]]
+        for category, values in DEFAULTS.items():
+            config_rows.extend([[category, value, ""] for value in values])
+        for department, programs in DEFAULT_PROGRAMS.items():
+            config_rows.extend([["programs", program, department] for program in programs])
+        for program, projects in DEFAULT_PROJECTS.items():
+            config_rows.extend([["projects", project, program] for project in projects])
+        _update_values(service, sheet_id, "'Config'!A1", config_rows)
     _update_values(service, sheet_id, "'Dashboard'!A1", _dashboard_values())
     service.spreadsheets().batchUpdate(
         spreadsheetId=sheet_id,
@@ -300,6 +318,7 @@ def main() -> None:
     ).execute()
     print("Sheet setup complete: Data, Users, Config, and Dashboard are ready.")
     print("Add staff in Users: telegram_id, name, email, default_department, active (TRUE/FALSE).")
+    print("Config uses Category, Value, Parent; add programs under departments and projects under programs.")
 
 
 if __name__ == "__main__":

@@ -6,13 +6,13 @@ A no-frontend Telegram bot for collecting staff expense claims. FastAPI receives
 
 - **Open access:** any Telegram user can use `/start` and `/new`; there is no Users-tab access gate.
 - **Staff profile defaults:** if the user's Telegram ID is present in `Users`, the bot fills in the saved name, email, and default department. If not, it uses the user's Telegram display name, leaves email blank, and asks them to select a department. Name and email are never asked in chat.
-- **Guided submission:** department, expense type, project, one to five bill photos/PDFs, confirmation or manual entry of bill date/vendor/amount, description, and reimbursement month. When the optional AI check is enabled, the bot tries to extract date, vendor, and amount from the first bill photo, and asks the user to confirm each extracted value. It asks for any value it could not read. PDFs are not scanned for details. Lists use buttons; projects are paginated. Month, expense type, and project can use Other where applicable.
+- **Guided submission:** everyone can submit a reimbursement; Telegram IDs in `ADMIN_TELEGRAM_IDS` can choose between Reimbursement Flow and Direct Payment Flow. Both collect month, department, program/product, project/institution, expense type, bill date, vendor, amount, and one to five bill attachments. Reimbursements use the submitter's saved or Telegram display name. When enabled, the optional AI check compares entered bill details against the first bill photo without replacing them. PDFs are not scanned.
 - **Validation and warnings:** accepts `DD/MM/YYYY` or `today`, rejects future dates and amounts less than or equal to zero, strips `Rs`, `₹`, and commas from amounts. Claims older than 90 days and possible same-user/vendor/amount/date duplicates produce warnings but are not blocked.
-- **Bills:** uploads go under `Reimbursements/YYYY-MM/<Name>/` in the configured Drive folder. Each upload is named `<bill-date>_<vendor>_<amount>_<number>.<extension>`. Files are limited to 20 MB each.
-- **Submission record:** the bot appends one row to `Data` with a unique Submission ID, profile and expense information, Drive links, AI result/notes, and initial status `Pending`. Admins update Status and Admin Remarks directly in Sheets.
-- **Optional staff/config tabs:** `Users` provides profile defaults and the recipients for weekly reminders; its `active` column affects reminders only, not bot access. Dropdowns come from `Config` and are cached for up to 10 minutes.
+- **Bills:** reimbursement uploads go under `Reimbursements/YYYY-MM/<Name>/` and direct-payment uploads under `Direct Payments/YYYY-MM/<Name>/` in the configured Drive folder. Each upload is named `<bill-date>_<vendor>_<amount>_<number>.<extension>`. Files are limited to 20 MB each.
+- **Submission record:** the bot appends one row to `Data` with a unique Submission ID, flow type, program, profile and expense information, Drive links, AI result/notes, and initial status `Pending`. Admins update Status and Admin Remarks directly in Sheets.
+- **Optional staff/config tabs:** `Users` provides profile defaults and the recipients for weekly reminders; its `active` column affects reminders only, not bot access. The `Config` tab controls departments, expense types, programs, and projects/institutions. Dropdowns reflect edits within 60 seconds.
 - **Dashboard:** `setup_sheet.py` creates a starter dashboard with formulas and charts. The current workbook's Dashboard can instead be customized with Gemini in Google Sheets. A Gemini-created visual dashboard can show total/pending/paid amounts, submission count, spend by department/project, status breakdown, and pending approvals. It should reference `Data` and leave the append-only data sheet unchanged.
-- **Optional AI check and bill extraction:** off by default. When enabled, the first image bill is sent to the configured NVIDIA vision model to extract its date, vendor, and total amount; the user confirms or corrects each value before entering the description. The bot reports when automatic reading fails or fields are unclear, then asks for manual entry. The confirmed details are compared with the extraction at submission without making a second AI request, and the first photo download is reused for Drive upload. PDFs are not processed by AI. AI is advisory and never rejects a claim; the model is prompted not to guess, but extracted details must be confirmed by the user.
+- **Optional AI check:** off by default. When enabled, the first image bill is sent to the configured NVIDIA vision model and compared with the entered date, vendor, and amount. The AI check is advisory and never rejects a submission. PDFs are not processed by AI, and the first photo download is reused for Drive upload.
 - **Admin notifications and reminders:** optionally DMs configured admins after submissions. The protected `/cron` endpoint sends weekly reminders to active `Users` rows that have no claim for the current month.
 - **Health and retries:** `/health` is used for health checks. Telegram webhook requests are checked using `WEBHOOK_SECRET`; repeated update IDs are deduplicated in a bounded in-memory cache.
 
@@ -31,11 +31,11 @@ A no-frontend Telegram bot for collecting staff expense claims. FastAPI receives
 5. Add the service account email (`client_email` in the JSON key) as an Editor of the spreadsheet. Add it as a Shared Drive member with permission to create files/folders.
 6. Run `setup_sheet.py` once, as described below. It creates `Data`, `Users`, `Config`, and `Dashboard`, adds the Data headers and status validation, and writes starter dashboard formulas/charts.
 7. In `Users`, optionally add rows with columns `telegram_id`, `name`, `email`, `default_department`, `active`. A matching user receives saved profile details/default department. Only active rows receive weekly reminders.
-8. `Config` has `Category` and `Value` columns. Supported category values are `departments`, `expense_types`, and `projects`. The defaults include the provided department, expense type, and project lists. Config edits are read within 10 minutes.
+8. `Config` has `Category`, `Value`, and `Parent` columns. Use `departments` and `expense_types` with no Parent; use `programs` with the department as Parent; use `projects` with the program/product as Parent. For example, add `programs | New Program | Education` or `projects | New Institution | New Program`. Add rows in this tab to update the bot's choices; new values become available within 60 seconds. If no program or project options exist for a selection, the bot asks for that value as text. For an existing sheet, update old department/expense options and give project rows a program Parent; unparented project rows are not used. `setup_sheet.py` seeds the supplied defaults once and preserves Config rows on later runs.
 
 ### Dashboard and setup script warning
 
-If you have already built a custom visual Dashboard with Gemini, keep it. **Do not rerun `setup_sheet.py` after customizing the workbook:** the script rewrites the `Config` values and the `Dashboard` starter content. It does not change existing Data rows, but it will replace dashboard formulas/content. The Gemini dashboard should use `Data` as its source and refer to the actual columns:
+If you have already built a custom visual Dashboard with Gemini, keep it. **Do not rerun `setup_sheet.py` after customizing the workbook:** the script preserves existing `Config` rows but rewrites the `Dashboard` starter content. It does not change existing Data rows, but it will replace dashboard formulas/content. The Gemini dashboard should use `Data` as its source and refer to the actual columns:
 
 | Column | Field |
 |---|---|
@@ -57,12 +57,14 @@ If you have already built a custom visual Dashboard with Gemini, keep it. **Do n
 | P | AI Notes |
 | Q | Status |
 | R | Admin Remarks |
+| S | Flow Type |
+| T | Program Name |
 
 ## Telegram and secrets
 
 1. In Telegram, message [@BotFather](https://t.me/BotFather), run `/newbot`, and save the token as `TELEGRAM_BOT_TOKEN`.
 2. Create a random webhook secret of 1–256 letters, digits, underscores, or hyphens for `WEBHOOK_SECRET`.
-3. Set `ADMIN_TELEGRAM_IDS` to comma-separated numeric Telegram IDs for admins who should receive notifications. It may be empty.
+3. Set `ADMIN_TELEGRAM_IDS` to comma-separated numeric Telegram IDs for admins who can use Direct Payment Flow and receive notifications. It may be empty.
 4. Create a separate long random value for `CRON_SECRET`.
 5. Set these additional variables if needed:
    - `AI_CHECK_ENABLED=false` by default. To turn on AI checks, set it to `true` and provide `NVIDIA_API_KEY`.
@@ -159,13 +161,13 @@ If Python is not on PATH or you prefer not to activate the environment, run the 
 .\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-The app registers Telegram's webhook as `<RENDER_EXTERNAL_URL>/telegram/webhook` when it starts. Keep this terminal running. Verify:
+The app registers Telegram's webhook as `<RENDER_EXTERNAL_URL>/telegram/webhook` when it starts. Set `ADMIN_TELEGRAM_IDS` to comma-separated Telegram user IDs to enable the direct-payment flow for admins. Keep this terminal running. Verify:
 
 ```powershell
 Invoke-RestMethod "http://127.0.0.1:8000/health"
 ```
 
-It should return `status: ok`. In Telegram, send `/start`, tap **Start a reimbursement** or send `/new`, answer the prompts, attach a bill, tap **Done**, review, and submit. If you restart the tunnel and its URL changes, update `RENDER_EXTERNAL_URL` and restart the bot so it registers the new URL.
+It should return `status: ok`. In Telegram, send `/start` and tap **Start an expense submission**, or send `/new`. Admin IDs choose a flow; everyone else starts reimbursement. Follow the prompts, attach a bill, tap **Done**, review, and submit. If you restart the tunnel and its URL changes, update `RENDER_EXTERNAL_URL` and restart the bot so it registers the new URL.
 
 ### Local troubleshooting
 
@@ -191,20 +193,64 @@ The bot does not use a database or write uploaded bills to local disk. Bills are
 
 ## Optional Render deployment
 
-Local operation does not require Render. To deploy, push the project to a Git provider, create a Render Web Service, and use the build/start commands in `render.yaml`. Add the required environment variables in Render's settings; Render supplies `RENDER_EXTERNAL_URL`, which the app uses to set the Telegram webhook. Configure `/health` as the health check. On Render's free tier the service may sleep when idle, so first webhook responses can be delayed while it wakes.
+Local operation does not require Render. Render deploys this app from a Git repository; it does not deploy directly from this folder.
+
+### Deploy using the Render Blueprint
+
+1. Push the project to a GitHub, GitLab, or Bitbucket repository. Check that `.env.local` is not committed; it contains secrets and is ignored by `.gitignore`.
+2. In the Render dashboard, choose **New + → Blueprint** and connect/select the repository.
+3. Render reads [`render.yaml`](./render.yaml) and shows the `expense-reimbursement-bot` web service. Review it and choose **Apply**.
+4. Open the new service's **Environment** settings and provide the values for every required variable below. Keep secrets in Render's environment settings, not in the repository. Leave `RENDER_EXTERNAL_URL` to Render; the service uses it to register Telegram's webhook at startup.
+5. Save changes and wait for the deploy to finish. Open `https://<your-render-service>.onrender.com/health`; it should return `{"status":"ok"}`. The deploy log should say that the Telegram webhook was configured.
+6. In Telegram, send `/start` to the bot and test a reimbursement.
+
+### Render service commands and settings
+
+These are service configuration commands, not commands to type into PowerShell. The Blueprint fills them in automatically:
+
+| Render setting | Value | What it does |
+| --- | --- | --- |
+| Runtime | Python | Runs the FastAPI application. |
+| Build command | `pip install -r requirements.txt` | Installs the Python packages listed by this project. |
+| Start command | `uvicorn main:app --host 0.0.0.0 --port $PORT` | Starts the app and listens on the port assigned by Render. |
+| Health check path | `/health` | Lets Render verify that the app is responding. |
+
+If creating the service manually instead of using the Blueprint, create a **Web Service**, connect the repository, select **Python**, and enter these same build command, start command, and health check path.
+
+### Environment variables to set in Render
+
+| Variable | Required? | Value |
+| --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather. |
+| `WEBHOOK_SECRET` | Yes | A unique 1-256 character string using letters, numbers, `_` or `-`. |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Yes | The complete service-account JSON. Keep it secret; the service account needs access to the Sheet and Shared Drive folder. |
+| `SHEET_ID` | Yes | Spreadsheet ID only, not the full URL. |
+| `DRIVE_FOLDER_ID` | Yes | ID of the destination folder inside a Google Workspace Shared Drive. |
+| `CRON_SECRET` | Yes | A separate secret for the optional `/cron` endpoint. |
+| `NVIDIA_API_KEY` | For AI extraction | NVIDIA API key. Set this if enabling AI extraction. |
+| `AI_CHECK_ENABLED` | Optional | Set to `true` to enable image extraction and AI comparison; otherwise it defaults to `false`. |
+| `NVIDIA_MODEL` | Optional | Defaults to `meta/llama-3.2-11b-vision-instruct`. |
+| `ADMIN_TELEGRAM_IDS` | Optional | Comma-separated Telegram user IDs allowed to use Direct Payment Flow and receive notifications. |
+| `NOTIFY_ADMINS` | Optional | Defaults to `true`; set `false` to disable admin notifications. |
+| `PYTHON_VERSION` | Set by Blueprint | The Blueprint selects Python `3.11.10`. |
+| `RENDER_EXTERNAL_URL` | Set by Render | Do not enter manually; Render provides this URL for webhook registration. |
+
+On Render's free tier, the service may sleep when idle, so initial webhook responses can be delayed while it wakes.
 
 ## Weekly reminders (optional)
 
-Use a free external cron service to POST weekly to `https://<PUBLIC_HOST>/cron` with header `X-Cron-Secret: <CRON_SECRET>`. The endpoint DMs active rows in `Users` that have no Data submission for the current `YYYY-MM` month. Users absent from `Users` do not receive reminders.
+Use a free external cron service to POST weekly to `https://<PUBLIC_HOST>/cron` with header `X-Cron-Secret: <CRON_SECRET>`. The endpoint DMs active rows in `Users` that have no reimbursement submission for the current `YYYY-MM` month. Direct Payment Flow submissions do not suppress reminders. Users absent from `Users` do not receive reminders.
 
 ## Test checklist
 
 - [ ] `/health` returns HTTP 200 with `{"status":"ok"}`.
 - [ ] `/start` works for users who are and are not in `Users`.
 - [ ] A Users match fills name, email, and default department; an unlisted user gets Telegram display name and blank email.
-- [ ] Month, department, expense type, project, Other text inputs, and project pagination work.
+- [ ] Non-admins start reimbursement directly; admins can choose reimbursement or direct payment.
+- [ ] Month, department, program/product, project/institution, expense type, bill date, vendor, amount, and uploads follow the requested order.
+- [ ] Adding department, program, project, and expense type rows to `Config` changes the corresponding choices; missing program/project choices prompt for text.
 - [ ] Invalid/future bill dates, zero/negative amounts, unsupported files, files over 20 MB, and excess bills are rejected.
-- [ ] One to five bills can be uploaded and submitted to a Shared Drive; a Pending row is appended to Data with the expected links and values.
+- [ ] One to five bills can be uploaded and submitted to a Shared Drive; a Pending row includes the selected flow, program, links, and expected expense values.
 - [ ] Duplicate and older-than-90-day claims warn but can continue; AI mismatch/unreadable is advisory, and AI outages save as Skipped.
 - [ ] `/mylast` shows the current Sheet status after an admin changes it.
 - [ ] Invalid webhook and cron secrets are rejected; repeated webhook update IDs are deduplicated while the process is running.
