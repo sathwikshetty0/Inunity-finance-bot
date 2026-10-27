@@ -233,10 +233,8 @@ async def _prompt_department(
         "departments"
     ]
     default = session["staff"]["default_department"]
-    if not values:
-        session["step"] = "department_text"
-        await message.reply_text("Enter the department name.")
-        return
+    if default and default not in values:
+        values = [default, *values]
     session["step"] = "department"
     buttons = [
         (f"{value} (default)" if value == default else value, f"department:{i}")
@@ -377,7 +375,6 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("That department selection has expired. Please retry.")
             return
         session["department"] = value
-        session["department_from_options"] = True
         session.pop("program", None)
         session.pop("project", None)
         session.pop("expense_type", None)
@@ -394,7 +391,6 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("That program selection has expired. Please retry.")
             return
         session["program"] = value
-        session["program_from_options"] = True
         session.pop("project", None)
         session.pop("expense_type", None)
         await _prompt_project(query.message, session, context)
@@ -414,7 +410,6 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("Enter the expense type.")
             return
         session["expense_type"] = value
-        session["expense_from_options"] = True
         await _continue_after_expense_type(query.message, session)
     elif data.startswith("project_page:"):
         await _prompt_project(query.message, session, context, int(data.split(":", 1)[1]))
@@ -434,7 +429,6 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("Enter the project or institution name.")
             return
         session["project"] = value
-        session["project_from_options"] = True
         session.pop("expense_type", None)
         await _prompt_expense_type(query.message, session, context)
     elif data == "bills:done":
@@ -478,22 +472,11 @@ async def _handle_text(
             await _show_summary(message, session)
         else:
             await _prompt_department(message, session, context)
-    elif step == "department_text":
-        if not text:
-            await message.reply_text("Please enter the department name.")
-            return
-        session["department"] = text[:200]
-        session["department_from_options"] = False
-        session.pop("program", None)
-        session.pop("project", None)
-        session.pop("expense_type", None)
-        await _prompt_program(message, session, context)
     elif step == "program_text":
         if not text:
             await message.reply_text("Please enter the program or product name.")
             return
         session["program"] = text[:200]
-        session["program_from_options"] = False
         session.pop("project", None)
         session.pop("expense_type", None)
         await _prompt_project(message, session, context)
@@ -502,12 +485,10 @@ async def _handle_text(
             await message.reply_text("Please enter the project or institution name.")
             return
         session["project"] = text[:200]
-        session["project_from_options"] = False
         session.pop("expense_type", None)
         await _prompt_expense_type(message, session, context)
     elif step == "expense_other":
         session["expense_type"] = text[:200]
-        session["expense_from_options"] = False
         await _continue_after_expense_type(message, session)
     elif step == "bill_date":
         parsed = _parse_bill_date(text)
@@ -746,67 +727,6 @@ async def _begin_edit(
         await _prompt_upload(message, session)
 
 
-async def _revalidate_selections(
-    message: Any, context: ContextTypes.DEFAULT_TYPE, session: dict[str, Any]
-) -> bool:
-    """Re-check option selections against the latest Config before submitting.
-
-    Config may have changed since the draft started. Options picked from a
-    configured list must still exist under the same parent; values entered as
-    free text are left alone. Returns False after re-prompting when a selection
-    is no longer valid.
-    """
-    config = await asyncio.to_thread(context.application.bot_data["sheets"].get_config)
-    department = session["department"]
-    program = session["program"]
-    project = session["project"]
-    expense_type = session["expense_type"]
-
-    session["editing"] = True
-    if config["departments"] and department not in config["departments"]:
-        await message.reply_text(
-            f'"{department}" is no longer an available department. Please choose again.'
-        )
-        session.pop("program", None)
-        session.pop("project", None)
-        session.pop("expense_type", None)
-        await _prompt_department(message, session, context)
-        return False
-    if (
-        session.get("program_from_options")
-        and program not in config["programs"].get(department, [])
-    ):
-        await message.reply_text(
-            f'"{program}" is no longer available under {department}. Please choose again.'
-        )
-        session.pop("project", None)
-        session.pop("expense_type", None)
-        await _prompt_program(message, session, context)
-        return False
-    if (
-        session.get("project_from_options")
-        and project not in config["projects"].get(program, [])
-    ):
-        await message.reply_text(
-            f'"{project}" is no longer available under {program}. Please choose again.'
-        )
-        session.pop("expense_type", None)
-        await _prompt_project(message, session, context)
-        return False
-    if (
-        session.get("expense_from_options")
-        and config["expense_types"]
-        and expense_type not in config["expense_types"]
-    ):
-        await message.reply_text(
-            f'"{expense_type}" is no longer an available expense type. Please choose again.'
-        )
-        await _prompt_expense_type(message, session, context)
-        return False
-    session.pop("editing", None)
-    return True
-
-
 async def _validate_and_submit(
     message: Any,
     context: ContextTypes.DEFAULT_TYPE,
@@ -836,9 +756,6 @@ async def _validate_and_submit(
         return
     if session["flow_type"] not in {"Reimbursement Flow", "Direct Payment Flow"}:
         await message.reply_text("That expense flow is invalid. Please use /new to start again.")
-        return
-
-    if not await _revalidate_selections(message, context, session):
         return
 
     sheets: SheetsService = context.application.bot_data["sheets"]

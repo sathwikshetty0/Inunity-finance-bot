@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import logging
-import threading
 import time
 from typing import Any
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-LOGGER = logging.getLogger(__name__)
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-CONFIG_CACHE_TTL_SECONDS = 60
 
 DATA_HEADERS = [
     "Timestamp",
@@ -103,7 +99,6 @@ class SheetsService:
         self._service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
         self.sheet_id = sheet_id
         self._config_cache: tuple[float, dict[str, Any]] | None = None
-        self._config_lock = threading.Lock()
         self._submission_ids: set[str] | None = None
 
     def get_user(self, telegram_id: int) -> dict[str, str] | None:
@@ -127,27 +122,9 @@ class SheetsService:
 
     def get_config(self) -> dict[str, Any]:
         now = time.monotonic()
-        if self._config_cache and now - self._config_cache[0] < CONFIG_CACHE_TTL_SECONDS:
+        if self._config_cache and now - self._config_cache[0] < 60:
             return self._config_cache[1]
-        # Serialize refreshes so concurrent users trigger at most one Sheets read.
-        with self._config_lock:
-            now = time.monotonic()
-            if self._config_cache and now - self._config_cache[0] < CONFIG_CACHE_TTL_SECONDS:
-                return self._config_cache[1]
-            try:
-                values = self._load_config()
-            except Exception:
-                # Keep serving the last valid configuration; retry on the next call.
-                if self._config_cache is not None:
-                    LOGGER.exception(
-                        "Config refresh failed; using the last cached configuration"
-                    )
-                    return self._config_cache[1]
-                raise
-            self._config_cache = (now, values)
-            return values
 
-    def _load_config(self) -> dict[str, Any]:
         response = (
             self._service.spreadsheets()
             .values()
@@ -155,126 +132,48 @@ class SheetsService:
             .execute()
         )
         values: dict[str, Any] = {
-            "departments": [],
-            "expense_types": [],
-            "programs": {},
-            "projects": {},
+            "departments": list(DEFAULTS["departments"]),
+            "expense_types": list(DEFAULTS["expense_types"]),
+            "programs": {
+                department: list(programs)
+                for department, programs in DEFAULT_PROGRAMS.items()
+            },
+            "projects": {
+                program: list(projects)
+                for program, projects in DEFAULT_PROJECTS.items()
+            },
         }
-        seen: dict[str, set] = {
-            "department": set(),
-            "expense_type": set(),
-            "program": set(),
-            "project": set(),
-        }
-        for row_number, row in enumerate(response.get("values", []), start=2):
-            cells = [str(cell).strip() for cell in row]
-            if not any(cells):
-                continue
-            category = cells[0].lower() if cells else ""
-            value = cells[1] if len(cells) > 1 else ""
-            parent = cells[2] if len(cells) > 2 else ""
-            if not value:
-                LOGGER.warning("Config row %d ignored: blank Value", row_number)
-                continue
-            if category in {"department", "departments"}:
-                key = value.casefold()
-                if key in seen["department"]:
-                    LOGGER.warning(
-                        "Config row %d ignored: duplicate department %r", row_number, value
-                    )
-                    continue
-                seen["department"].add(key)
-                values["departments"].append(value)
-            elif category in {"expense_type", "expense_types", "expensetype", "expensetypes"}:
-                key = value.casefold()
-                if key in seen["expense_type"]:
-                    LOGGER.warning(
-                        "Config row %d ignored: duplicate expense type %r", row_number, value
-                    )
-                    continue
-                seen["expense_type"].add(key)
-                values["expense_types"].append(value)
-            elif category in {"program", "programs"}:
-                if not parent:
-                    LOGGER.warning(
-                        "Config row %d ignored: program %r has no Parent department",
-                        row_number,
-                        value,
-                    )
-                    continue
-                if parent.casefold() == value.casefold():
-                    LOGGER.warning(
-                        "Config row %d ignored: program %r cannot be its own parent",
-                        row_number,
-                        value,
-                    )
-                    continue
-                key = (parent.casefold(), value.casefold())
-                if key in seen["program"]:
-                    LOGGER.warning(
-                        "Config row %d ignored: duplicate program %r under %r",
-                        row_number,
-                        value,
-                        parent,
-                    )
-                    continue
-                seen["program"].add(key)
-                values["programs"].setdefault(parent, []).append(value)
-            elif category in {"project", "projects", "institution", "institutions"}:
-                if not parent:
-                    LOGGER.warning(
-                        "Config row %d ignored: project %r has no Parent program",
-                        row_number,
-                        value,
-                    )
-                    continue
-                if parent.casefold() == value.casefold():
-                    LOGGER.warning(
-                        "Config row %d ignored: project %r cannot be its own parent",
-                        row_number,
-                        value,
-                    )
-                    continue
-                key = (parent.casefold(), value.casefold())
-                if key in seen["project"]:
-                    LOGGER.warning(
-                        "Config row %d ignored: duplicate project %r under %r",
-                        row_number,
-                        value,
-                        parent,
-                    )
-                    continue
-                seen["project"].add(key)
-                values["projects"].setdefault(parent, []).append(value)
-            else:
-                LOGGER.warning(
-                    "Config row %d ignored: unknown Category %r", row_number, cells[0]
-                )
-        self._validate_config(values)
-        return values
+        found_departments: list[str] = []
+        found_expense_types: list[str] = []
+        found_programs: list[tuple[str, str]] = []
+        found_projects: list[tuple[str, str]] = []
+        for row in response.get("values", []):
+            if len(row) >= 2:
+                category, value = row[0].strip().lower(), row[1].strip()
+                parent = row[2].strip() if len(row) >= 3 else ""
+                if category in {"department", "departments"} and value:
+                    found_departments.append(value)
+                elif category in {"expense_type", "expense_types"} and value:
+                    found_expense_types.append(value)
+                elif category in {"program", "programs"} and value and parent:
+                    found_programs.append((parent, value))
+                elif category in {"project", "projects"} and value and parent:
+                    found_projects.append((parent, value))
 
-    @staticmethod
-    def _validate_config(values: dict[str, Any]) -> None:
-        departments = {d.casefold() for d in values["departments"]}
-        program_names = {
-            program.casefold()
-            for programs in values["programs"].values()
-            for program in programs
-        }
-        for parent in values["programs"]:
-            if parent.casefold() not in departments:
-                LOGGER.warning(
-                    "Config: program parent %r is not a configured department; "
-                    "programs under it are unreachable",
-                    parent,
-                )
-        for parent in values["projects"]:
-            if parent.casefold() not in program_names:
-                LOGGER.warning(
-                    "Config: project parent %r is not a configured program; "
-                    "projects under it are unreachable",
-                    parent,
-                )
+        if found_departments:
+            values["departments"] = found_departments
+        if found_expense_types:
+            values["expense_types"] = found_expense_types
+        if found_programs:
+            values["programs"] = {}
+            for department, program in found_programs:
+                values["programs"].setdefault(department, []).append(program)
+        if found_projects:
+            values["projects"] = {}
+            for program, project in found_projects:
+                values["projects"].setdefault(program, []).append(project)
+        self._config_cache = (now, values)
+        return values
 
     def append_submission(self, row: list[Any]) -> None:
         if len(row) != len(DATA_HEADERS):
