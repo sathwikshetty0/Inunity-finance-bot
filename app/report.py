@@ -74,7 +74,7 @@ def build_reimbursement_docx(
             cells = table.add_row().cells
             cells[0].text = str(serial) if index == 0 else ""
             cells[1].text = category if index == 0 else ""
-            cells[2].text = "NA"
+            cells[2].text = _text(row, 8) or "NA"  # Description stores the bill number
             vendor = _text(row, 10) or "NA"
             project = _text(row, 12)
             bill_date = _text(row, 9)

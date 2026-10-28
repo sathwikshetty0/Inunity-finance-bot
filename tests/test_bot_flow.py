@@ -134,7 +134,8 @@ async def test_ai_confirm_skips_manual_fields():
     context = make_context(settings=make_settings(ai_check_enabled=True, nvidia_api_key="k"))
     driver = Driver(context)
     extraction = BillExtractionResult(
-        "OK", bill_date="2026-10-15", vendor="Acme Corp", amount="1250.00"
+        "OK", bill_date="2026-10-15", vendor="Acme Corp", amount="1250.00",
+        bill_number="INV-123",
     )
     with patch.object(
         bot_handlers, "extract_bill_details", return_value=extraction
@@ -149,6 +150,7 @@ async def test_ai_confirm_skips_manual_fields():
 
     assert "detected from your bill" in driver.texts()[-1]
     assert "15/10/2026" in driver.texts()[-1]
+    assert "INV-123" in driver.texts()[-1]
     assert "ai:confirm" in button_callbacks(driver.message.replies[-1])
 
     await driver.click("ai:confirm")
@@ -161,6 +163,7 @@ async def test_ai_confirm_skips_manual_fields():
     assert session["bill_date"] == "2026-10-15"
     assert session["vendor"] == "Acme Corp"
     assert session["amount"] == "1250.00"
+    assert session["bill_number"] == "INV-123"
 
 
 async def test_ai_edit_single_field_preserves_others():
@@ -447,6 +450,23 @@ async def test_report_generates_docx_and_saves_to_drive():
 
     drive = context.application.bot_data["drive"]
     assert any(u[2].endswith(".docx") for u in drive.uploads)
+
+
+async def test_stats_menu_shows_month_totals():
+    context = make_context()
+    month = "2026-10"
+    context.application.bot_data["sheets"].report_rows = [
+        ["ts", "id1", "e", "Test User", "111", month, "Education", "Travel", "",
+         "2026-10-15", "Acme", "1000", "P", "l", "OK", "", "Pending", "", "Reimbursement Flow", "prog"],
+        ["ts", "id2", "e", "Test User", "111", month, "Education", "Purchases", "",
+         "2026-10-16", "B", "250.50", "P", "l", "OK", "", "Paid", "", "Reimbursement Flow", "prog"],
+    ]
+    driver = Driver(context)
+    await driver.click("menu:stats")
+    text = driver.texts()[-1]
+    assert "2 expenses" in text
+    assert "1,250.50" in text
+    assert "Pending: 1" in text and "Paid: 1" in text
 
 
 async def test_bills_done_requires_a_file():

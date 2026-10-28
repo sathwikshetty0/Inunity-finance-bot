@@ -27,6 +27,7 @@ class BillExtractionResult:
     bill_date: str | None = None
     vendor: str | None = None
     amount: str | None = None
+    bill_number: str | None = None
     notes: str = ""
 
 
@@ -126,9 +127,11 @@ async def extract_bill_details(
         "Read the expense bill image. Do not guess, infer, or invent details. Only transcribe "
         "values clearly visible on the bill. For a blank, non-bill, or blurry image, set legible "
         "to false and return null for every field. Return the final total paid/grand total, not "
-        "a subtotal, tax, or individual line item. Return a JSON object with exactly these keys: "
-        "bill_date (string in YYYY-MM-DD format or null), vendor (string or null), "
-        "amount (number or null), legible (boolean). Use null for any value that cannot be read."
+        "a subtotal, tax, or individual line item. Return the bill/invoice/receipt number "
+        "exactly as printed (letters and digits, no spaces). Return a JSON object with exactly "
+        "these keys: bill_date (string in YYYY-MM-DD format or null), vendor (string or null), "
+        "amount (number or null), bill_number (string or null), legible (boolean). "
+        "Use null for any value that cannot be read."
     )
     data_url = f"data:{mime_type};base64,{base64.b64encode(image).decode('ascii')}"
     payload = {
@@ -180,6 +183,12 @@ async def extract_bill_details(
 
         vendor = result.get("vendor")
         vendor = vendor.strip()[:200] if isinstance(vendor, str) and vendor.strip() else None
+        bill_number = result.get("bill_number")
+        bill_number = (
+            bill_number.strip()[:50]
+            if isinstance(bill_number, str) and bill_number.strip()
+            else None
+        )
         extracted_amount = result.get("amount")
         amount = None
         if extracted_amount is not None and not isinstance(extracted_amount, bool):
@@ -191,7 +200,7 @@ async def extract_bill_details(
                         amount = formatted_amount
             except (InvalidOperation, ValueError):
                 pass
-        return BillExtractionResult("OK", bill_date, vendor, amount)
+        return BillExtractionResult("OK", bill_date, vendor, amount, bill_number)
     except (
         httpx.HTTPError,
         KeyError,

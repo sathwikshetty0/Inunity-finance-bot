@@ -132,7 +132,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     session = _sessions(context).get(user.id)
     if not session:
-        await message.reply_text("Use /new to start an expense submission.")
+        await _send_main_menu(message)
         return
     if message.photo or message.document:
         await _receive_bill(update, session)
@@ -141,6 +141,31 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await message.reply_text("Please send a text response or a bill photo/PDF.")
         return
     await _handle_text(update, context, session, text)
+
+
+_MAIN_MENU = InlineKeyboardMarkup(
+    [
+        [
+            InlineKeyboardButton("New expense submission", callback_data="new"),
+            InlineKeyboardButton("My submissions", callback_data="menu:last"),
+        ],
+        [
+            InlineKeyboardButton("Download report", callback_data="menu:report"),
+            InlineKeyboardButton("This month's stats", callback_data="menu:stats"),
+        ],
+    ]
+)
+
+
+async def _send_main_menu(message: Any) -> None:
+    await message.reply_text(
+        "What would you like to do?\n\n"
+        "- New expense submission (/new)\n"
+        "- My submissions (/mylast)\n"
+        "- Download report (/report)\n"
+        "- This month's stats",
+        reply_markup=_MAIN_MENU,
+    )
 
 
 async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -172,9 +197,7 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "/mylast - view your 5 most recent submissions and their status\n"
         "/report - get a Word reimbursement letter for a month\n"
         "/cancel - discard your current draft",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Start an expense submission", callback_data="new")]]
-        ),
+        reply_markup=_MAIN_MENU,
     )
 
 
@@ -538,6 +561,15 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if query.data == "new":
         await _start_submission(update, context)
         return
+    if query.data == "menu:report":
+        await _start_report(update, context)
+        return
+    if query.data == "menu:last":
+        await _show_last(update, context)
+        return
+    if query.data == "menu:stats":
+        await _show_stats(update, context)
+        return
     if query.data in {"flow:reimbursement", "flow:direct"}:
         flow_type = (
             "Reimbursement Flow"
@@ -871,6 +903,7 @@ async def _prompt_ai_confirm(message: Any, session: dict[str, Any]) -> None:
         "bill_date": extraction.bill_date,
         "vendor": extraction.vendor,
         "amount": extraction.amount,
+        "bill_number": extraction.bill_number,
     }
     session["extracted"] = detected
     amount_text = f"Rs {detected['amount']}" if detected["amount"] else "Not detected"
@@ -878,7 +911,8 @@ async def _prompt_ai_confirm(message: Any, session: dict[str, Any]) -> None:
         "Please check the details detected from your bill:\n"
         f"Bill Date: {_format_bill_date(detected['bill_date'])}\n"
         f"Vendor: {detected['vendor'] or 'Not detected'}\n"
-        f"Amount: {amount_text}\n\n"
+        f"Amount: {amount_text}\n"
+        f"Bill No: {detected['bill_number'] or 'Not detected'}\n\n"
         "Are these details correct?",
         reply_markup=InlineKeyboardMarkup(
             [
@@ -901,6 +935,7 @@ def _apply_extracted(session: dict[str, Any], skip: str | None = None) -> None:
         ("bill_date", extraction.bill_date if extraction else None),
         ("vendor", extraction.vendor if extraction else None),
         ("amount", extraction.amount if extraction else None),
+        ("bill_number", extraction.bill_number if extraction else None),
     ):
         if value and field != skip:
             session[field] = value
@@ -1289,7 +1324,7 @@ async def _save_submission(
             session["month"],
             session["department"],
             session["expense_type"],
-            session.get("description", ""),
+            session.get("description") or session.get("bill_number", ""),
             session["bill_date"],
             session["vendor"],
             float(Decimal(session["amount"])),
@@ -1366,6 +1401,45 @@ async def _download_bill(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> by
     buffer = io.BytesIO()
     await telegram_file.download_to_memory(out=buffer)
     return buffer.getvalue()
+
+
+async def _show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    month = datetime.now(INDIA_TIMEZONE).strftime("%Y-%m")
+    rows = await asyncio.to_thread(
+        context.application.bot_data["sheets"].get_submissions_for_month, user_id, month
+    )
+    if not rows:
+        await update.effective_message.reply_text(
+            f"You have no submissions for {month} yet. Use /new to add one."
+        )
+        return
+    total = Decimal("0")
+    statuses: dict[str, tuple[int, Decimal]] = {}
+    categories: dict[str, Decimal] = {}
+    for row in rows:
+        try:
+            amount = Decimal(str(row[11]).replace(",", ""))
+        except (InvalidOperation, IndexError):
+            amount = Decimal("0")
+        total += amount
+        status = row[16].strip() if len(row) > 16 and row[16].strip() else "Pending"
+        count, subtotal = statuses.get(status, (0, Decimal("0")))
+        statuses[status] = (count + 1, subtotal + amount)
+        category = row[7].strip() if len(row) > 7 and row[7].strip() else "Other"
+        categories[category] = categories.get(category, Decimal("0")) + amount
+
+    month_label = datetime.now(INDIA_TIMEZONE).strftime("%b %Y")
+    lines = [f"Your stats for {month_label}:", f"{len(rows)} expenses — Rs {total:,.2f}", ""]
+    for status, (count, subtotal) in sorted(statuses.items()):
+        lines.append(f"{status}: {count} (Rs {subtotal:,.2f})")
+    lines.append("")
+    lines.append("By expense type:")
+    for category, subtotal in sorted(categories.items()):
+        lines.append(f"- {category}: Rs {subtotal:,.2f}")
+    lines.append("")
+    lines.append("Send /report to get the Word letter for this month.")
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def _show_last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
