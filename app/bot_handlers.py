@@ -563,6 +563,7 @@ async def _generate_report(
         LOGGER.exception("Failed to upload report copy to Drive for user %s", user_id)
         await progress.reply_text("The report was sent here, but saving a copy to Drive failed.")
     _sessions(context).pop(user_id, None)
+    await _send_main_menu(message)
 
 
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1427,6 +1428,7 @@ async def _save_submission(
         f"Submission ID: {session['id']}\n"
         "Status: Pending."
     )
+    await _send_main_menu(message)
     if settings.notify_admins:
         summary = (
             f"New {session['flow_type']} submission {session['id']}\n"
