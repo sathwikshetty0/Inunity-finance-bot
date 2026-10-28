@@ -68,8 +68,8 @@ async def check_bill(
         ],
     }
     try:
-        async with asyncio.timeout(30):
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        async with asyncio.timeout(60):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
                 response = await client.post(
                     NVIDIA_ENDPOINT,
                     headers={
@@ -146,8 +146,8 @@ async def extract_bill_details(
         ],
     }
     try:
-        async with asyncio.timeout(30):
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        async with asyncio.timeout(60):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
                 response = await client.post(
                     NVIDIA_ENDPOINT,
                     headers={
