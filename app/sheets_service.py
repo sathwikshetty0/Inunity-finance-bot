@@ -174,7 +174,14 @@ class SheetsService:
             value = cells[1] if len(cells) > 1 else ""
             parent = cells[2] if len(cells) > 2 else ""
             if not value:
-                LOGGER.warning("Config row %d ignored: blank Value", row_number)
+                # A category or parent with no Value is a leftover stub row;
+                # only warn when a Parent is set, which is genuinely malformed.
+                if parent:
+                    LOGGER.warning(
+                        "Config row %d ignored: Parent %r set but Value is blank",
+                        row_number,
+                        parent,
+                    )
                 continue
             if category in {"department", "departments"}:
                 key = value.casefold()
