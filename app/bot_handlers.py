@@ -50,6 +50,7 @@ _STEP_CALLBACKS = {
     "warning": ("warning:continue", "warning:fix", "edit:"),
     "edit_fields": ("edit:",),
     "report_month": ("report_month:",),
+    "reuse": ("reuse:",),
 }
 INDIA_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
@@ -247,6 +248,23 @@ async def _create_submission(
         "ai_result": AICheckResult("Skipped", "AI validation is disabled."),
     }
     _sessions(context)[user_id] = session
+    previous = context.application.bot_data.get("last_details", {}).get(user_id)
+    if previous:
+        session["step"] = "reuse"
+        session["previous"] = previous
+        await update.effective_message.reply_text(
+            "Use the same details as your last submission?\n"
+            f"Department: {previous['department']}\n"
+            f"Program: {previous['program']}\n"
+            f"Project/Institution: {previous['project']}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Same details", callback_data="reuse:yes")],
+                    [InlineKeyboardButton("Enter new details", callback_data="reuse:no")],
+                ]
+            ),
+        )
+        return
     await _prompt_month(update.effective_message, session, _today())
 
 
@@ -608,7 +626,16 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data.startswith("report_month:"):
         await _generate_report(query.message, context, user_id, session, data.split(":", 1)[1])
         return
-    if data.startswith("month:"):
+    if data.startswith("reuse:"):
+        previous = session.pop("previous", None)
+        if not previous:
+            await _prompt_month(query.message, session, _today())
+            return
+        if data == "reuse:yes":
+            session.update(previous)
+            session["reused"] = True
+        await _prompt_month(query.message, session, _today())
+    elif data.startswith("month:"):
         value = data.split(":", 1)[1]
         if value == "other":
             session["step"] = "month_text"
@@ -620,6 +647,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             session["month"] = value
             if session.pop("editing", False):
                 await _show_summary(query.message, session)
+            elif session.get("reused"):
+                session.pop("reused", None)
+                await _after_project(query.message, context, session)
             else:
                 await _prompt_department(query.message, session, context)
     elif data.startswith("department:"):
@@ -748,6 +778,9 @@ async def _handle_text(
         session["month"] = text
         if session.pop("editing", False):
             await _show_summary(message, session)
+        elif session.get("reused"):
+            session.pop("reused", None)
+            await _after_project(message, context, session)
         else:
             await _prompt_department(message, session, context)
     elif step == "department_text":
@@ -1372,6 +1405,18 @@ async def _save_submission(
         return
 
     _sessions(context).pop(user_id, None)
+    last = context.application.bot_data.setdefault("last_details", OrderedDict())
+    last[user_id] = {
+        "department": session["department"],
+        "program": session["program"],
+        "project": session["project"],
+        "department_from_options": session.get("department_from_options", False),
+        "program_from_options": session.get("program_from_options", False),
+        "project_from_options": session.get("project_from_options", False),
+    }
+    last.move_to_end(user_id)
+    while len(last) > MAX_COMPLETED_SUBMISSIONS:
+        last.popitem(last=False)
     completed = context.application.bot_data.setdefault("completed_submissions", OrderedDict())
     completed[user_id] = session["id"]
     completed.move_to_end(user_id)

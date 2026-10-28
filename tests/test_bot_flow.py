@@ -452,6 +452,51 @@ async def test_report_generates_docx_and_saves_to_drive():
     assert any(u[2].endswith(".docx") for u in drive.uploads)
 
 
+async def test_reuse_last_details_skips_option_steps():
+    context = make_context()
+    context.application.bot_data["last_details"] = {
+        111: {
+            "department": "Education",
+            "program": "Mindset Program",
+            "project": "VVCE",
+            "department_from_options": True,
+            "program_from_options": True,
+            "project_from_options": True,
+        }
+    }
+    driver = Driver(context)
+    await driver.click("new")
+    assert "same details" in driver.texts()[-1]
+    assert driver.session()["step"] == "reuse"
+
+    await driver.click("reuse:yes")
+    assert driver.session()["step"] == "month"
+
+    await driver.click("month:2026-10")
+    # Department/program/project reused -> straight to bill upload.
+    assert driver.session()["step"] == "upload"
+    session = driver.session()
+    assert session["department"] == "Education"
+    assert session["program"] == "Mindset Program"
+    assert session["project"] == "VVCE"
+
+
+async def test_reuse_no_starts_normal_flow():
+    context = make_context()
+    context.application.bot_data["last_details"] = {
+        111: {
+            "department": "Education",
+            "program": "Mindset Program",
+            "project": "VVCE",
+        }
+    }
+    driver = Driver(context)
+    await driver.click("new")
+    await driver.click("reuse:no")
+    await driver.click("month:2026-10")
+    assert driver.session()["step"] == "department"
+
+
 async def test_stats_menu_shows_month_totals():
     context = make_context()
     month = "2026-10"
