@@ -378,6 +378,32 @@ async def test_cancel_button_works_from_upload():
     assert driver.user.id not in driver.context.application.bot_data["sessions"]
 
 
+async def test_back_button_navigates_previous_step():
+    driver = Driver(make_context())
+    await driver.click("new")
+    await driver.click("month:2026-10")
+    assert driver.session()["step"] == "department"
+
+    await driver.click("back")
+    assert driver.session()["step"] == "month"
+    assert "reimbursement month" in driver.texts()[-1]
+
+    await driver.click("month:2026-10")
+    await driver.click("department:0")
+    assert driver.session()["step"] == "program"
+
+    await driver.click("back")
+    assert driver.session()["step"] == "department"
+
+    await driver.click("department:0")
+    await driver.click("program:0")
+    await driver.click("project:0")
+    assert driver.session()["step"] == "upload"
+
+    await driver.click("back")
+    assert driver.session()["step"] == "project"
+
+
 async def test_bills_done_requires_a_file():
     driver = Driver(make_context())
     await driver.click("new")

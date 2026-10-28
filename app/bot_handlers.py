@@ -31,6 +31,9 @@ MAX_BILLS = 5
 MAX_COMPLETED_SUBMISSIONS = 10_000
 PROJECT_PAGE_SIZE = 8
 BILL_FIELDS = ("bill_date", "vendor", "amount")
+BACK_MARKUP = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("Back", callback_data="back")]]
+)
 
 # Which callback_data prefixes are valid for each session step. A press that
 # does not match the current step is a stale keyboard and must not re-run.
@@ -251,13 +254,14 @@ async def _prompt_department(
     default = session["staff"]["default_department"]
     if not values:
         session["step"] = "department_text"
-        await message.reply_text("Enter the department name.")
+        await message.reply_text("Enter the department name.", reply_markup=BACK_MARKUP)
         return
     session["step"] = "department"
     buttons = [
         (f"{value} (default)" if value == default else value, f"department:{i}")
         for i, value in enumerate(values)
     ]
+    buttons.append(("Back", "back"))
     session["department_options"] = values
     await message.reply_text(
         "Choose the department.",
@@ -272,11 +276,14 @@ async def _prompt_program(
     values = config["programs"].get(session["department"], [])
     if not values:
         session["step"] = "program_text"
-        await message.reply_text("Enter the program or product name.")
+        await message.reply_text(
+            "Enter the program or product name.", reply_markup=BACK_MARKUP
+        )
         return
     session["step"] = "program"
     session["program_options"] = values
     buttons = [(value, f"program:{i}") for i, value in enumerate(values)]
+    buttons.append(("Back", "back"))
     await message.reply_text(
         "Choose the program or product.",
         reply_markup=_button_rows(buttons, columns=1),
@@ -291,11 +298,12 @@ async def _prompt_expense_type(
     ]
     if not values:
         session["step"] = "expense_other"
-        await message.reply_text("Enter the expense type.")
+        await message.reply_text("Enter the expense type.", reply_markup=BACK_MARKUP)
         return
     session["step"] = "expense_type"
     session["expense_options"] = values
     buttons = [(value, f"expense:{i}") for i, value in enumerate(values)]
+    buttons.append(("Back", "back"))
     await message.reply_text(
         "Choose the expense type.",
         reply_markup=_button_rows(buttons, columns=1),
@@ -330,7 +338,9 @@ async def _prompt_project(
     values = config["projects"].get(session["program"], [])
     if not values:
         session["step"] = "project_text"
-        await message.reply_text("Enter the project or institution name.")
+        await message.reply_text(
+            "Enter the project or institution name.", reply_markup=BACK_MARKUP
+        )
         return
     session["project_options"] = values
     session["project_page"] = page
@@ -345,6 +355,7 @@ async def _prompt_project(
         controls.append(("Previous", f"project_page:{page - 1}"))
     if start + PROJECT_PAGE_SIZE < len(values):
         controls.append(("Next", f"project_page:{page + 1}"))
+    controls.append(("Back", "back"))
     items.extend(controls)
     await message.reply_text(
         "Choose the project.",
@@ -355,10 +366,10 @@ async def _prompt_project(
 def _callback_allowed(session: dict[str, Any], data: str) -> bool:
     """Return True when a callback matches the session's current step.
 
-    Cancelling is always valid; every other callback is only meaningful on the
-    keyboard for the step that produced it, so stale presses are ignored.
+    Cancel and Back are always valid; every other callback is only meaningful
+    on the keyboard for the step that produced it, so stale presses are ignored.
     """
-    if data == "cancel":
+    if data in {"cancel", "back"}:
         return True
     prefixes = _STEP_CALLBACKS.get(session.get("step"), ())
     return any(data == prefix or data.startswith(prefix) for prefix in prefixes)
@@ -382,6 +393,58 @@ async def _after_project(
         await _prompt_expense_type(message, session, context)
     else:
         await _prompt_upload(message, session)
+
+
+async def _go_back(
+    message: Any, context: ContextTypes.DEFAULT_TYPE, session: dict[str, Any]
+) -> None:
+    """Re-prompt the step before the current one."""
+    step = session.get("step")
+    session.pop("ai_edit_field", None)
+    # While editing an existing draft, Back returns to the review summary.
+    if session.get("editing") and all(
+        session.get(key)
+        for key in ("month", "department", "program", "project", "expense_type")
+    ):
+        session.pop("editing", None)
+        await _show_summary(message, session)
+        return
+    if step in {"month", "month_text", "department", "department_text"}:
+        await _prompt_month(message, session, _today())
+    elif step in {"program", "program_text"}:
+        await _prompt_department(message, session, context)
+    elif step in {"project", "project_text"}:
+        await _prompt_program(message, session, context)
+    elif step == "upload":
+        await _prompt_project(message, session, context, session.get("project_page", 0))
+    elif step == "ai_confirm":
+        await _prompt_upload(message, session)
+    elif step == "ai_edit":
+        await _prompt_ai_confirm(message, session)
+    elif step in {"expense_type", "expense_other"}:
+        extraction = session.get("ai_extraction")
+        if extraction is not None and extraction.result == "OK":
+            await _prompt_ai_confirm(message, session)
+        else:
+            await _prompt_upload(message, session)
+    elif step in BILL_FIELDS:
+        pending = session.get("pending_fields") or []
+        previous = None
+        if step in pending:
+            index = pending.index(step)
+            previous = pending[index - 1] if index > 0 else None
+        if previous:
+            await _prompt_text_field(message, session, previous)
+        else:
+            await _prompt_expense_type(message, session, context)
+    elif step == "edit_fields":
+        await _show_summary(message, session)
+    elif step == "warning":
+        await _show_summary(message, session)
+    elif step == "summary":
+        await _show_edit_fields(message, session)
+    else:
+        await message.reply_text("There is no previous step. Use /cancel to start over.")
 
 
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -430,11 +493,17 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # Disable the keyboard that was just used so it cannot be pressed twice.
     await _remove_keyboard(query.message)
 
+    if data == "back":
+        await _go_back(query.message, context, session)
+        return
     if data.startswith("month:"):
         value = data.split(":", 1)[1]
         if value == "other":
             session["step"] = "month_text"
-            await query.message.reply_text("Enter the month as YYYY-MM (for example, 2026-10).")
+            await query.message.reply_text(
+                "Enter the month as YYYY-MM (for example, 2026-10).",
+                reply_markup=BACK_MARKUP,
+            )
         else:
             session["month"] = value
             if session.pop("editing", False):
@@ -514,7 +583,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "vendor": "Enter the vendor or party name.",
             "amount": "Enter the amount in Rs (for example, 1,250 or Rs 1,250.50).",
         }
-        await query.message.reply_text(prompts[field])
+        await query.message.reply_text(prompts[field], reply_markup=BACK_MARKUP)
     elif data == "ai:reupload":
         session["files"] = []
         session.pop("ai_extraction", None)
@@ -694,7 +763,7 @@ async def _prompt_text_field(message: Any, session: dict[str, Any], field: str) 
         "amount": ("amount", "Enter the amount in Rs (for example, 1,250 or Rs 1,250.50)."),
     }
     session["step"] = field
-    await message.reply_text(prompts[field][1])
+    await message.reply_text(prompts[field][1], reply_markup=BACK_MARKUP)
 
 
 async def _prompt_upload(message: Any, session: dict[str, Any]) -> None:
@@ -706,7 +775,10 @@ async def _prompt_upload(message: Any, session: dict[str, Any]) -> None:
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("Done uploading", callback_data="bills:done")],
-                [InlineKeyboardButton("Cancel", callback_data="cancel")],
+                [
+                    InlineKeyboardButton("Back", callback_data="back"),
+                    InlineKeyboardButton("Cancel", callback_data="cancel"),
+                ],
             ]
         ),
     )
@@ -737,6 +809,7 @@ async def _prompt_ai_confirm(message: Any, session: dict[str, Any]) -> None:
                     InlineKeyboardButton("Edit amount", callback_data="ai:edit:amount"),
                 ],
                 [InlineKeyboardButton("Upload the bill again", callback_data="ai:reupload")],
+                [InlineKeyboardButton("Back", callback_data="back")],
             ]
         ),
     )
@@ -904,9 +977,11 @@ async def _show_edit_fields(message: Any, session: dict[str, Any]) -> None:
         ("Amount", "amount"),
         ("Bill attachments", "bills"),
     ]
+    buttons = [(label, f"edit:{field}") for label, field in fields]
+    buttons.append(("Back", "back"))
     await message.reply_text(
         "Which field would you like to edit?",
-        reply_markup=_button_rows([(label, f"edit:{field}") for label, field in fields]),
+        reply_markup=_button_rows(buttons),
     )
 
 
@@ -1076,6 +1151,7 @@ async def _validate_and_submit(
                 [
                     [InlineKeyboardButton("Fix a field", callback_data="warning:fix")],
                     [InlineKeyboardButton("Continue anyway", callback_data="warning:continue")],
+                    [InlineKeyboardButton("Back", callback_data="back")],
                 ]
             ),
         )
