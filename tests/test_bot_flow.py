@@ -324,6 +324,30 @@ async def test_removed_option_reprompts_at_submit():
     assert sheets.appended == []
 
 
+async def test_no_manual_entry_options_in_menus():
+    context = make_context()
+    driver = Driver(context)
+    await driver.click("new")
+    await driver.click("month:2026-10")
+    await driver.click("department:0")
+    await driver.click("program:0")
+
+    # Collect every callback from the department, program, project, and
+    # expense menus; none may offer free-text entry.
+    seen = []
+    for reply in driver.message.replies:
+        seen.extend(button_callbacks(reply))
+    await driver.click("project:0")
+    await driver.send_photo()
+    await driver.click("bills:done")
+    for reply in driver.message.replies:
+        seen.extend(button_callbacks(reply))
+    config_scopes = {"department", "program", "project", "expense"}
+    assert not any(
+        cb.endswith(":other") and cb.split(":")[0] in config_scopes for cb in seen
+    )
+
+
 async def test_direct_payment_admin_only():
     # Non-admin pressing the direct-payment button is refused.
     context = make_context()

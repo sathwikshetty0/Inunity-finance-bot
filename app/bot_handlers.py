@@ -277,7 +277,6 @@ async def _prompt_program(
     session["step"] = "program"
     session["program_options"] = values
     buttons = [(value, f"program:{i}") for i, value in enumerate(values)]
-    buttons.append(("Other (enter manually)", "program:other"))
     await message.reply_text(
         "Choose the program or product.",
         reply_markup=_button_rows(buttons, columns=1),
@@ -290,10 +289,13 @@ async def _prompt_expense_type(
     values = (await asyncio.to_thread(context.application.bot_data["sheets"].get_config))[
         "expense_types"
     ]
+    if not values:
+        session["step"] = "expense_other"
+        await message.reply_text("Enter the expense type.")
+        return
     session["step"] = "expense_type"
     session["expense_options"] = values
     buttons = [(value, f"expense:{i}") for i, value in enumerate(values)]
-    buttons.append(("Other (enter manually)", "expense:other"))
     await message.reply_text(
         "Choose the expense type.",
         reply_markup=_button_rows(buttons, columns=1),
@@ -338,8 +340,6 @@ async def _prompt_project(
         (value, f"project:{i}")
         for i, value in enumerate(values[start : start + PROJECT_PAGE_SIZE], start=start)
     ]
-    if start + PROJECT_PAGE_SIZE >= len(values):
-        items.append(("Other (enter manually)", "project:other"))
     controls = []
     if page > 0:
         controls.append(("Previous", f"project_page:{page - 1}"))
@@ -455,10 +455,6 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _prompt_program(query.message, session, context)
     elif data.startswith("program:"):
         token = data.split(":", 1)[1]
-        if token == "other":
-            session["step"] = "program_text"
-            await query.message.reply_text("Enter the program or product name.")
-            return
         try:
             value = session["program_options"][int(token)]
         except (KeyError, ValueError, IndexError):
@@ -471,18 +467,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _prompt_project(query.message, session, context)
     elif data.startswith("expense:"):
         token = data.split(":", 1)[1]
-        if token == "other":
-            session["step"] = "expense_other"
-            await query.message.reply_text("Enter the expense type.")
-            return
         try:
             value = session["expense_options"][int(token)]
         except (ValueError, IndexError):
             await query.message.reply_text("That expense type selection has expired. Please retry.")
-            return
-        if value.casefold() == "other":
-            session["step"] = "expense_other"
-            await query.message.reply_text("Enter the expense type.")
             return
         session["expense_type"] = value
         session["expense_from_options"] = True
@@ -491,18 +479,10 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _prompt_project(query.message, session, context, int(data.split(":", 1)[1]))
     elif data.startswith("project:"):
         token = data.split(":", 1)[1]
-        if token == "other":
-            session["step"] = "project_text"
-            await query.message.reply_text("Enter the project or institution name.")
-            return
         try:
             value = session["project_options"][int(token)]
         except (ValueError, IndexError):
             await query.message.reply_text("That project selection has expired. Please retry.")
-            return
-        if value.casefold() == "other":
-            session["step"] = "project_text"
-            await query.message.reply_text("Enter the project or institution name.")
             return
         session["project"] = value
         session["project_from_options"] = True
