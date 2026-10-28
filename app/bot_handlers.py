@@ -30,6 +30,22 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_BILLS = 5
 MAX_COMPLETED_SUBMISSIONS = 10_000
 PROJECT_PAGE_SIZE = 8
+BILL_FIELDS = ("bill_date", "vendor", "amount")
+
+# Which callback_data prefixes are valid for each session step. A press that
+# does not match the current step is a stale keyboard and must not re-run.
+_STEP_CALLBACKS = {
+    "month": ("month:",),
+    "department": ("department:",),
+    "program": ("program:",),
+    "project": ("project:", "project_page:"),
+    "expense_type": ("expense:",),
+    "upload": ("bills:done",),
+    "ai_confirm": ("ai:",),
+    "summary": ("submit", "warning:fix", "edit:"),
+    "warning": ("warning:continue", "warning:fix", "edit:"),
+    "edit_fields": ("edit:",),
+}
 INDIA_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -233,8 +249,10 @@ async def _prompt_department(
         "departments"
     ]
     default = session["staff"]["default_department"]
-    if default and default not in values:
-        values = [default, *values]
+    if not values:
+        session["step"] = "department_text"
+        await message.reply_text("Enter the department name.")
+        return
     session["step"] = "department"
     buttons = [
         (f"{value} (default)" if value == default else value, f"department:{i}")
@@ -282,11 +300,22 @@ async def _prompt_expense_type(
     )
 
 
-async def _continue_after_expense_type(message: Any, session: dict[str, Any]) -> None:
+async def _continue_after_expense_type(
+    message: Any, context: ContextTypes.DEFAULT_TYPE, session: dict[str, Any]
+) -> None:
     if session.pop("editing", False):
         await _show_summary(message, session)
     else:
-        await _prompt_text_field(message, session, "bill_date")
+        await _advance_pending(message, session)
+
+
+async def _advance_pending(message: Any, session: dict[str, Any]) -> None:
+    """Prompt for the next bill field that still needs a value, else summarize."""
+    pending = session.get("pending_fields") or []
+    if pending:
+        await _prompt_text_field(message, session, pending[0])
+    else:
+        await _show_summary(message, session)
 
 
 async def _prompt_project(
@@ -323,6 +352,38 @@ async def _prompt_project(
     )
 
 
+def _callback_allowed(session: dict[str, Any], data: str) -> bool:
+    """Return True when a callback matches the session's current step.
+
+    Cancelling is always valid; every other callback is only meaningful on the
+    keyboard for the step that produced it, so stale presses are ignored.
+    """
+    if data == "cancel":
+        return True
+    prefixes = _STEP_CALLBACKS.get(session.get("step"), ())
+    return any(data == prefix or data.startswith(prefix) for prefix in prefixes)
+
+
+async def _remove_keyboard(message: Any) -> None:
+    try:
+        await message.edit_reply_markup(reply_markup=None)
+    except BadRequest:
+        pass
+    except Exception:
+        LOGGER.debug("Could not remove inline keyboard", exc_info=True)
+
+
+async def _after_project(
+    message: Any, context: ContextTypes.DEFAULT_TYPE, session: dict[str, Any]
+) -> None:
+    # New order: project -> bill upload -> AI check -> expense type -> details.
+    # When editing a completed draft that already has bills, skip re-upload.
+    if session.get("editing") and session["files"]:
+        await _prompt_expense_type(message, session, context)
+    else:
+        await _prompt_upload(message, session)
+
+
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user_id = update.effective_user.id
@@ -357,6 +418,18 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     data = query.data or ""
+    if not _callback_allowed(session, data):
+        # A button on an older message was pressed after that step moved on.
+        # Disable it so it cannot be pressed again instead of re-running the step.
+        await _remove_keyboard(query.message)
+        await query.message.reply_text(
+            "That option is no longer active for this step. "
+            "Please use the buttons on the latest message."
+        )
+        return
+    # Disable the keyboard that was just used so it cannot be pressed twice.
+    await _remove_keyboard(query.message)
+
     if data.startswith("month:"):
         value = data.split(":", 1)[1]
         if value == "other":
@@ -375,6 +448,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("That department selection has expired. Please retry.")
             return
         session["department"] = value
+        session["department_from_options"] = True
         session.pop("program", None)
         session.pop("project", None)
         session.pop("expense_type", None)
@@ -391,6 +465,7 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("That program selection has expired. Please retry.")
             return
         session["program"] = value
+        session["program_from_options"] = True
         session.pop("project", None)
         session.pop("expense_type", None)
         await _prompt_project(query.message, session, context)
@@ -410,7 +485,8 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("Enter the expense type.")
             return
         session["expense_type"] = value
-        await _continue_after_expense_type(query.message, session)
+        session["expense_from_options"] = True
+        await _continue_after_expense_type(query.message, context, session)
     elif data.startswith("project_page:"):
         await _prompt_project(query.message, session, context, int(data.split(":", 1)[1]))
     elif data.startswith("project:"):
@@ -429,21 +505,62 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text("Enter the project or institution name.")
             return
         session["project"] = value
+        session["project_from_options"] = True
         session.pop("expense_type", None)
-        await _prompt_expense_type(query.message, session, context)
+        await _after_project(query.message, context, session)
     elif data == "bills:done":
         if not session["files"]:
             await query.message.reply_text("Upload at least one bill photo or PDF before continuing.")
         else:
-            await _finish_bill_upload(query.message, context, session)
+            progress = await query.message.reply_text("Checking your bill. Please wait.")
+            await _finish_bill_upload(progress, context, session)
+    elif data == "ai:confirm":
+        _apply_extracted(session)
+        session["pending_fields"] = [
+            field for field in BILL_FIELDS if not session.get(field)
+        ]
+        await _prompt_expense_type(query.message, session, context)
+    elif data.startswith("ai:edit:"):
+        field = data.split(":", 2)[2]
+        if field not in BILL_FIELDS:
+            await query.message.reply_text("That field cannot be edited here.")
+            return
+        # Keep the other extracted values; only this field is being corrected.
+        _apply_extracted(session, skip=field)
+        session["ai_edit_field"] = field
+        session["step"] = "ai_edit"
+        prompts = {
+            "bill_date": 'Enter the bill date as DD/MM/YYYY, or type "today".',
+            "vendor": "Enter the vendor or party name.",
+            "amount": "Enter the amount in Rs (for example, 1,250 or Rs 1,250.50).",
+        }
+        await query.message.reply_text(prompts[field])
+    elif data == "ai:reupload":
+        session["files"] = []
+        session.pop("ai_extraction", None)
+        await _prompt_upload(query.message, session)
     elif data == "submit":
-        progress = await query.message.reply_text("Submitting your expense. Please wait.")
-        await _validate_and_submit(progress, context, user_id, session)
+        if session.get("submitting"):
+            await query.message.reply_text("Your submission is already being processed.")
+            return
+        session["submitting"] = True
+        try:
+            progress = await query.message.reply_text("Submitting your expense. Please wait.")
+            await _validate_and_submit(progress, context, user_id, session)
+        finally:
+            session.pop("submitting", None)
     elif data == "warning:continue":
-        progress = await query.message.reply_text("Submitting your expense. Please wait.")
-        await _save_submission(progress, context, user_id, session)
+        if session.get("submitting"):
+            await query.message.reply_text("Your submission is already being processed.")
+            return
+        session["submitting"] = True
+        try:
+            progress = await query.message.reply_text("Submitting your expense. Please wait.")
+            await _save_submission(progress, context, user_id, session)
+        finally:
+            session.pop("submitting", None)
     elif data == "warning:fix":
-        await _show_edit_fields(query.message)
+        await _show_edit_fields(query.message, session)
     elif data.startswith("edit:"):
         await _begin_edit(query.message, context, session, data.split(":", 1)[1])
     elif data == "cancel":
@@ -472,11 +589,22 @@ async def _handle_text(
             await _show_summary(message, session)
         else:
             await _prompt_department(message, session, context)
+    elif step == "department_text":
+        if not text:
+            await message.reply_text("Please enter the department name.")
+            return
+        session["department"] = text[:200]
+        session["department_from_options"] = False
+        session.pop("program", None)
+        session.pop("project", None)
+        session.pop("expense_type", None)
+        await _prompt_program(message, session, context)
     elif step == "program_text":
         if not text:
             await message.reply_text("Please enter the program or product name.")
             return
         session["program"] = text[:200]
+        session["program_from_options"] = False
         session.pop("project", None)
         session.pop("expense_type", None)
         await _prompt_project(message, session, context)
@@ -485,11 +613,43 @@ async def _handle_text(
             await message.reply_text("Please enter the project or institution name.")
             return
         session["project"] = text[:200]
+        session["project_from_options"] = False
         session.pop("expense_type", None)
-        await _prompt_expense_type(message, session, context)
+        await _after_project(message, context, session)
     elif step == "expense_other":
         session["expense_type"] = text[:200]
-        await _continue_after_expense_type(message, session)
+        session["expense_from_options"] = False
+        await _continue_after_expense_type(message, context, session)
+    elif step == "ai_edit":
+        field = session.pop("ai_edit_field", None)
+        if field == "bill_date":
+            parsed = _parse_bill_date(text)
+            if not parsed:
+                await message.reply_text(
+                    'Enter the bill date as DD/MM/YYYY, or type "today". Future dates are not accepted.'
+                )
+                return
+            if parsed > _today():
+                await message.reply_text("Bill date cannot be in the future. Please enter it again.")
+                return
+            session["bill_date"] = parsed.isoformat()
+        elif field == "vendor":
+            if not text:
+                await message.reply_text("Please enter the vendor or party name.")
+                return
+            session["vendor"] = text[:200]
+        elif field == "amount":
+            amount = _parse_amount(text)
+            if amount is None or amount <= 0:
+                await message.reply_text(
+                    "Enter an amount greater than zero, such as 1250 or Rs 1,250."
+                )
+                return
+            session["amount"] = f"{amount:.2f}"
+        session["pending_fields"] = [
+            f for f in BILL_FIELDS if not session.get(f)
+        ]
+        await _prompt_expense_type(message, session, context)
     elif step == "bill_date":
         parsed = _parse_bill_date(text)
         if not parsed:
@@ -504,7 +664,7 @@ async def _handle_text(
         if session.pop("editing", False):
             await _show_summary(message, session)
         else:
-            await _prompt_text_field(message, session, "vendor")
+            await _complete_pending(message, session, "bill_date")
     elif step == "vendor":
         if not text:
             await message.reply_text("Please enter the vendor or party name.")
@@ -513,7 +673,7 @@ async def _handle_text(
         if session.pop("editing", False):
             await _show_summary(message, session)
         else:
-            await _prompt_text_field(message, session, "amount")
+            await _complete_pending(message, session, "vendor")
     elif step == "amount":
         amount = _parse_amount(text)
         if amount is None or amount <= 0:
@@ -523,7 +683,7 @@ async def _handle_text(
         if session.pop("editing", False):
             await _show_summary(message, session)
         else:
-            await _prompt_upload(message, session)
+            await _complete_pending(message, session, "amount")
     elif step == "upload":
         if text.casefold() == "done":
             if session["files"]:
@@ -536,6 +696,15 @@ async def _handle_text(
         await message.reply_text("Choose a field to edit using the buttons above.")
     else:
         await message.reply_text("Please follow the current question or use /cancel.")
+
+
+async def _complete_pending(message: Any, session: dict[str, Any], field: str) -> None:
+    pending = session.get("pending_fields") or []
+    if pending and pending[0] == field:
+        pending.pop(0)
+    elif field in pending:
+        pending.remove(field)
+    await _advance_pending(message, session)
 
 
 async def _prompt_text_field(message: Any, session: dict[str, Any], field: str) -> None:
@@ -551,12 +720,65 @@ async def _prompt_text_field(message: Any, session: dict[str, Any], field: str) 
 async def _prompt_upload(message: Any, session: dict[str, Any]) -> None:
     session["step"] = "upload"
     await message.reply_text(
-        f"Upload 1 to {MAX_BILLS} bill photos or PDFs (up to 20 MB each). "
-        f"{len(session['files'])} attached. Tap Done when finished.",
+        f"Send your bill as a photo or PDF (up to 20 MB each). "
+        f"{len(session['files'])} of {MAX_BILLS} attached. "
+        "Send another bill to add it, or tap Done when all bills are attached.",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Done", callback_data="bills:done")]]
+            [
+                [InlineKeyboardButton("Done uploading", callback_data="bills:done")],
+                [InlineKeyboardButton("Cancel", callback_data="cancel")],
+            ]
         ),
     )
+
+
+async def _prompt_ai_confirm(message: Any, session: dict[str, Any]) -> None:
+    extraction = session["ai_extraction"]
+    session["step"] = "ai_confirm"
+    detected = {
+        "bill_date": extraction.bill_date,
+        "vendor": extraction.vendor,
+        "amount": extraction.amount,
+    }
+    session["extracted"] = detected
+    await message.reply_text(
+        "Please check the details detected from your bill:\n"
+        f"Bill Date: {_format_bill_date(detected['bill_date'])}\n"
+        f"Vendor: {detected['vendor'] or 'Not detected'}\n"
+        f"Amount: {f'Rs {detected['amount']}' if detected['amount'] else 'Not detected'}\n\n"
+        "Are these details correct?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Yes, all correct", callback_data="ai:confirm")],
+                [
+                    InlineKeyboardButton("Edit bill date", callback_data="ai:edit:bill_date"),
+                    InlineKeyboardButton("Edit vendor", callback_data="ai:edit:vendor"),
+                    InlineKeyboardButton("Edit amount", callback_data="ai:edit:amount"),
+                ],
+                [InlineKeyboardButton("Upload the bill again", callback_data="ai:reupload")],
+            ]
+        ),
+    )
+
+
+def _apply_extracted(session: dict[str, Any], skip: str | None = None) -> None:
+    extraction = session.get("ai_extraction")
+    for field, value in (
+        ("bill_date", extraction.bill_date if extraction else None),
+        ("vendor", extraction.vendor if extraction else None),
+        ("amount", extraction.amount if extraction else None),
+    ):
+        if value and field != skip:
+            session[field] = value
+
+
+def _format_bill_date(value: str | None) -> str:
+    if not value:
+        return "Not detected"
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return value
 
 
 async def _finish_bill_upload(
@@ -571,6 +793,7 @@ async def _finish_bill_upload(
         ),
         None,
     )
+    extraction = None
     if settings.ai_check_enabled and first_image:
         try:
             image = await asyncio.wait_for(
@@ -588,17 +811,26 @@ async def _finish_bill_upload(
             first_image["mime_type"],
         )
         session["ai_extraction"] = extraction
-        if extraction.result != "OK":
-            await message.reply_text(
-                (extraction.notes or "Automatic reading did not complete.")
-                + " The details you entered will be kept for submission."
-            )
     elif settings.ai_check_enabled:
+        session["ai_extraction"] = None
         await message.reply_text(
-            "Automatic bill checking works with photos, not PDFs. The details you entered will be used."
+            "Automatic bill checking works with photos, not PDFs. "
+            "Please enter the bill details manually."
         )
 
-    await _show_summary(message, session)
+    if extraction is not None and extraction.result == "OK":
+        await _prompt_ai_confirm(message, session)
+        return
+
+    if extraction is not None and extraction.result != "OK":
+        await message.reply_text(
+            (extraction.notes or "The bill could not be read automatically.")
+            + " Please enter the details manually."
+        )
+    session["pending_fields"] = [
+        field for field in BILL_FIELDS if not session.get(field)
+    ]
+    await _prompt_expense_type(message, session, context)
 
 
 async def _receive_bill(
@@ -649,7 +881,7 @@ async def _show_summary(message: Any, session: dict[str, Any]) -> None:
     session.pop("editing", None)
     staff = session["staff"]
     flow_name = session["flow_type"]
-    fields = []
+    fields = [f"Flow type: {flow_name}"]
     if flow_name == "Reimbursement Flow":
         fields.append(f"Name: {staff['name']}")
     fields.extend(
@@ -678,7 +910,8 @@ async def _show_summary(message: Any, session: dict[str, Any]) -> None:
     )
 
 
-async def _show_edit_fields(message: Any) -> None:
+async def _show_edit_fields(message: Any, session: dict[str, Any]) -> None:
+    session["step"] = "edit_fields"
     fields = [
         ("Month", "month"),
         ("Department", "department"),
@@ -727,6 +960,67 @@ async def _begin_edit(
         await _prompt_upload(message, session)
 
 
+async def _revalidate_selections(
+    message: Any, context: ContextTypes.DEFAULT_TYPE, session: dict[str, Any]
+) -> bool:
+    """Re-check option selections against the latest Config before submitting.
+
+    Config may have changed while the draft was open. Options picked from a
+    configured list must still exist under the same parent; values entered as
+    free text are left alone. Returns False after re-prompting when a selection
+    is no longer valid.
+    """
+    config = await asyncio.to_thread(context.application.bot_data["sheets"].get_config)
+    department = session["department"]
+    program = session["program"]
+    project = session["project"]
+    expense_type = session["expense_type"]
+
+    session["editing"] = True
+    if config["departments"] and department not in config["departments"]:
+        await message.reply_text(
+            f'"{department}" is no longer an available department. Please choose again.'
+        )
+        session.pop("program", None)
+        session.pop("project", None)
+        session.pop("expense_type", None)
+        await _prompt_department(message, session, context)
+        return False
+    if (
+        session.get("program_from_options")
+        and program not in config["programs"].get(department, [])
+    ):
+        await message.reply_text(
+            f'"{program}" is no longer available under {department}. Please choose again.'
+        )
+        session.pop("project", None)
+        session.pop("expense_type", None)
+        await _prompt_program(message, session, context)
+        return False
+    if (
+        session.get("project_from_options")
+        and project not in config["projects"].get(program, [])
+    ):
+        await message.reply_text(
+            f'"{project}" is no longer available under {program}. Please choose again.'
+        )
+        session.pop("expense_type", None)
+        await _prompt_project(message, session, context)
+        return False
+    if (
+        session.get("expense_from_options")
+        and config["expense_types"]
+        and expense_type not in config["expense_types"]
+    ):
+        await message.reply_text(
+            f'"{expense_type}" is no longer an available expense type. Please choose again.'
+        )
+        await _prompt_expense_type(message, session, context)
+        return False
+    session.pop("editing", None)
+    return True
+
+
 async def _validate_and_submit(
     message: Any,
     context: ContextTypes.DEFAULT_TYPE,
@@ -756,6 +1050,9 @@ async def _validate_and_submit(
         return
     if session["flow_type"] not in {"Reimbursement Flow", "Direct Payment Flow"}:
         await message.reply_text("That expense flow is invalid. Please use /new to start again.")
+        return
+
+    if not await _revalidate_selections(message, context, session):
         return
 
     sheets: SheetsService = context.application.bot_data["sheets"]

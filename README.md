@@ -6,13 +6,13 @@ A no-frontend Telegram bot for collecting staff expense claims. FastAPI receives
 
 - **Open access:** any Telegram user can use `/start` and `/new`; there is no Users-tab access gate.
 - **Staff profile defaults:** if the user's Telegram ID is present in `Users`, the bot fills in the saved name, email, and default department. If not, it uses the user's Telegram display name, leaves email blank, and asks them to select a department. Name and email are never asked in chat.
-- **Guided submission:** everyone can submit a reimbursement; Telegram IDs in `ADMIN_TELEGRAM_IDS` can choose between Reimbursement Flow and Direct Payment Flow. Both collect month, department, program/product, project/institution, expense type, bill date, vendor, amount, and one to five bill attachments. Reimbursements use the submitter's saved or Telegram display name. When enabled, the optional AI check compares entered bill details against the first bill photo without replacing them. PDFs are not scanned.
+- **Guided submission:** everyone can submit a reimbursement; Telegram IDs in `ADMIN_TELEGRAM_IDS` can choose between Reimbursement Flow and Direct Payment Flow. Both collect month, department, program/product, and project/institution, then ask for one to five bill attachments. When AI checking is enabled, the first bill photo is read and the detected bill date, vendor, and amount are shown for confirmation or correction; only fields that were not confirmed are asked manually afterwards, followed by the expense type and a final summary. When AI checking is disabled, the expense type, bill date, vendor, and amount are asked after the uploads. Reimbursements use the submitter's saved or Telegram display name. PDFs are not scanned.
 - **Validation and warnings:** accepts `DD/MM/YYYY` or `today`, rejects future dates and amounts less than or equal to zero, strips `Rs`, `₹`, and commas from amounts. Claims older than 90 days and possible same-user/vendor/amount/date duplicates produce warnings but are not blocked.
 - **Bills:** reimbursement uploads go under `Reimbursements/YYYY-MM/<Name>/` and direct-payment uploads under `Direct Payments/YYYY-MM/<Name>/` in the configured Drive folder. Each upload is named `<bill-date>_<vendor>_<amount>_<number>.<extension>`. Files are limited to 20 MB each.
 - **Submission record:** the bot appends one row to `Data` with a unique Submission ID, flow type, program, profile and expense information, Drive links, AI result/notes, and initial status `Pending`. Admins update Status and Admin Remarks directly in Sheets.
 - **Optional staff/config tabs:** `Users` provides profile defaults and the recipients for weekly reminders; its `active` column affects reminders only, not bot access. The `Config` tab controls departments, expense types, programs, and projects/institutions. Dropdowns reflect edits within 60 seconds.
 - **Dashboard:** `setup_sheet.py` creates a starter dashboard with formulas and charts. The current workbook's Dashboard can instead be customized with Gemini in Google Sheets. A Gemini-created visual dashboard can show total/pending/paid amounts, submission count, spend by department/project, status breakdown, and pending approvals. It should reference `Data` and leave the append-only data sheet unchanged.
-- **Optional AI check:** off by default. When enabled, the first image bill is sent to the configured NVIDIA vision model and compared with the entered date, vendor, and amount. The AI check is advisory and never rejects a submission. PDFs are not processed by AI, and the first photo download is reused for Drive upload.
+- **Optional AI check:** off by default. When enabled, the first image bill is sent to the configured NVIDIA vision model to extract the bill date, vendor, and total amount. The bot shows the detected values and asks for confirmation; the user can accept them, correct a single field, or re-upload the bill. The confirmed values are compared with the extraction again at submission time as an advisory note. The AI check never rejects a submission. PDFs are not processed by AI, and the first photo download is reused for Drive upload.
 - **Admin notifications and reminders:** optionally DMs configured admins after submissions. The protected `/cron` endpoint sends weekly reminders to active `Users` rows that have no claim for the current month.
 - **Health and retries:** `/health` is used for health checks. Telegram webhook requests are checked using `WEBHOOK_SECRET`; repeated update IDs are deduplicated in a bounded in-memory cache.
 
@@ -247,7 +247,7 @@ Use a free external cron service to POST weekly to `https://<PUBLIC_HOST>/cron` 
 - [ ] `/start` works for users who are and are not in `Users`.
 - [ ] A Users match fills name, email, and default department; an unlisted user gets Telegram display name and blank email.
 - [ ] Non-admins start reimbursement directly; admins can choose reimbursement or direct payment.
-- [ ] Month, department, program/product, project/institution, expense type, bill date, vendor, amount, and uploads follow the requested order.
+- [ ] Month, department, program/product, project/institution, bill uploads, AI confirmation, expense type, and any unconfirmed bill details follow the requested order.
 - [ ] Adding department, program, project, and expense type rows to `Config` changes the corresponding choices; missing program/project choices prompt for text.
 - [ ] Invalid/future bill dates, zero/negative amounts, unsupported files, files over 20 MB, and excess bills are rejected.
 - [ ] One to five bills can be uploaded and submitted to a Shared Drive; a Pending row includes the selected flow, program, links, and expected expense values.
@@ -255,5 +255,6 @@ Use a free external cron service to POST weekly to `https://<PUBLIC_HOST>/cron` 
 - [ ] `/mylast` shows the current Sheet status after an admin changes it.
 - [ ] Invalid webhook and cron secrets are rejected; repeated webhook update IDs are deduplicated while the process is running.
 - [ ] The Gemini dashboard summarizes Data without editing or sorting the append-only Data sheet.
-#   I n u n i t y - f i n a n c e - b o t  
+#   I n u n i t y - f i n a n c e - b o t 
+ 
  
