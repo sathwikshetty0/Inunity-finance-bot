@@ -745,7 +745,7 @@ async def _prompt_ai_confirm(message: Any, session: dict[str, Any]) -> None:
         "Please check the details detected from your bill:\n"
         f"Bill Date: {_format_bill_date(detected['bill_date'])}\n"
         f"Vendor: {detected['vendor'] or 'Not detected'}\n"
-        f"Amount: {f'Rs {detected['amount']}' if detected['amount'] else 'Not detected'}\n\n"
+        f"Amount: {f\"Rs {detected['amount']}\" if detected['amount'] else 'Not detected'}\n\n"
         "Are these details correct?",
         reply_markup=InlineKeyboardMarkup(
             [
