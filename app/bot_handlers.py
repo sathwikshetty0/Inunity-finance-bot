@@ -23,6 +23,7 @@ from app.ai_check import (
 )
 from app.config import Settings
 from app.drive_service import DriveService, safe_filename_part
+from app.report import build_reimbursement_docx
 from app.sheets_service import SheetsService
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ _STEP_CALLBACKS = {
     "summary": ("submit", "warning:fix", "edit:"),
     "warning": ("warning:continue", "warning:fix", "edit:"),
     "edit_fields": ("edit:",),
+    "report_month": ("report_month:",),
 }
 INDIA_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
@@ -120,8 +122,12 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await message.reply_text("Your draft was cancelled. Use /new to start another.")
         elif command == "/mylast":
             await _show_last(update, context)
+        elif command == "/report":
+            await _start_report(update, context)
         else:
-            await message.reply_text("Available commands: /start, /new, /cancel, /mylast")
+            await message.reply_text(
+                "Available commands: /start, /new, /cancel, /mylast, /report"
+            )
         return
 
     session = _sessions(context).get(user.id)
@@ -164,6 +170,7 @@ async def _handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "month, department, program, project/institution, expense type, bill date, vendor, "
         "and amount, then upload the bill.\n\n"
         "/mylast - view your 5 most recent submissions and their status\n"
+        "/report - get a Word reimbursement letter for a month\n"
         "/cancel - discard your current draft",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("Start an expense submission", callback_data="new")]]
@@ -447,6 +454,76 @@ async def _go_back(
         await message.reply_text("There is no previous step. Use /cancel to start over.")
 
 
+async def _start_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    staff = await asyncio.to_thread(context.application.bot_data["sheets"].get_user, user_id)
+    if not staff:
+        telegram_user = update.effective_user
+        display_name = " ".join(
+            part for part in (telegram_user.first_name, telegram_user.last_name) if part
+        ) or telegram_user.username or f"Telegram user {user_id}"
+        staff = {"telegram_id": str(user_id), "name": display_name, "email": "",
+                 "default_department": ""}
+    session = {"id": str(uuid.uuid4()), "staff": staff, "report": True}
+    _sessions(context)[user_id] = session
+    session["step"] = "report_month"
+    today = _today()
+    options = []
+    for offset in (-2, -1, 0):
+        year, month = today.year, today.month + offset
+        while month < 1:
+            month += 12
+            year -= 1
+        value = f"{year:04d}-{month:02d}"
+        options.append((datetime(year, month, 1).strftime("%b %Y"), f"report_month:{value}"))
+    options.append(("Cancel", "cancel"))
+    await update.effective_message.reply_text(
+        "Choose the month for the reimbursement report.",
+        reply_markup=_button_rows(options, columns=2),
+    )
+
+
+async def _generate_report(
+    message: Any,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    session: dict[str, Any],
+    month: str,
+) -> None:
+    sheets: SheetsService = context.application.bot_data["sheets"]
+    rows = await asyncio.to_thread(sheets.get_submissions_for_month, user_id, month)
+    if not rows:
+        _sessions(context).pop(user_id, None)
+        await message.reply_text(f"No reimbursement submissions found for {month}.")
+        return
+    progress = await message.reply_text("Generating your report. Please wait.")
+    staff = session["staff"]
+    docx_bytes = build_reimbursement_docx(staff["name"], month, rows)
+    filename = f"reimbursement_{month}_{safe_filename_part(staff['name'])}.docx"
+    await context.bot.send_document(
+        chat_id=user_id,
+        document=io.BytesIO(docx_bytes),
+        filename=filename,
+        caption=f"Reimbursement report for {month} ({len(rows)} expenses).",
+    )
+    drive: DriveService = context.application.bot_data["drive"]
+    try:
+        link = await asyncio.to_thread(
+            drive.upload_bill,
+            docx_bytes,
+            staff["name"],
+            month,
+            filename,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "Report",
+        )
+        await progress.reply_text(f"A copy was saved to Drive:\n{link}")
+    except Exception:
+        LOGGER.exception("Failed to upload report copy to Drive for user %s", user_id)
+        await progress.reply_text("The report was sent here, but saving a copy to Drive failed.")
+    _sessions(context).pop(user_id, None)
+
+
 async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user_id = update.effective_user.id
@@ -495,6 +572,9 @@ async def _handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data == "back":
         await _go_back(query.message, context, session)
+        return
+    if data.startswith("report_month:"):
+        await _generate_report(query.message, context, user_id, session, data.split(":", 1)[1])
         return
     if data.startswith("month:"):
         value = data.split(":", 1)[1]

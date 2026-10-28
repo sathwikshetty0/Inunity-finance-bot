@@ -357,6 +357,23 @@ class SheetsService:
         ]
         return list(reversed(rows[-limit:]))
 
+    def get_submissions_for_month(self, telegram_id: int, month: str) -> list[list[str]]:
+        """Return the user's reimbursement submissions for a YYYY-MM month."""
+        response = (
+            self._service.spreadsheets()
+            .values()
+            .get(spreadsheetId=self.sheet_id, range="'Data'!A2:T")
+            .execute()
+        )
+        return [
+            row
+            for row in response.get("values", [])
+            if len(row) >= 12
+            and row[4].strip() == str(telegram_id)
+            and row[5].strip() == month
+            and (len(row) <= 18 or row[18].strip() != "Direct Payment Flow")
+        ]
+
     def get_users(self) -> list[dict[str, str]]:
         response = (
             self._service.spreadsheets()

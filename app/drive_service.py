@@ -71,9 +71,10 @@ class DriveService:
         mime_type: str,
         flow_type: str = "Reimbursement",
     ) -> str:
-        flow_folder = (
-            "Direct Payments" if flow_type == "Direct Payment Flow" else "Reimbursements"
-        )
+        flow_folder = {
+            "Direct Payment Flow": "Direct Payments",
+            "Report": "Reports",
+        }.get(flow_type, "Reimbursements")
         flow_folder_id = self._get_or_create_folder(flow_folder, self.parent_folder_id)
         month_id = self._get_or_create_folder(month, flow_folder_id)
         user_id = self._get_or_create_folder(safe_filename_part(name), month_id)

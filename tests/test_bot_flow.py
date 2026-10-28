@@ -404,6 +404,51 @@ async def test_back_button_navigates_previous_step():
     assert driver.session()["step"] == "project"
 
 
+async def test_report_generates_docx_and_saves_to_drive():
+    from docx import Document
+    import io
+
+    context = make_context()
+    sheets = context.application.bot_data["sheets"]
+    sheets.report_rows = [
+        ["2026-10-01T10:00:00+00:00", "id1", "t@x.com", "Test User", "111",
+         "2026-10", "Education", "Travel", "", "2026-10-15", "Acme Corp",
+         "1250.5", "VVCE", "https://l", "OK", "", "Pending", "",
+         "Reimbursement Flow", "Mindset Program"],
+        ["2026-10-02T10:00:00+00:00", "id2", "t@x.com", "Test User", "111",
+         "2026-10", "Education", "Purchases", "", "2026-10-16", "Bolt Store",
+         "300", "VVCE", "https://l", "OK", "", "Pending", "",
+         "Reimbursement Flow", "Mindset Program"],
+    ]
+    driver = Driver(context)
+    driver.message.text = "/report"
+    update = FakeUpdate(user=driver.user, message=driver.message)
+    await bot_handlers.route_update(update, context)
+
+    assert "reimbursement report" in driver.texts()[-1].lower()
+    await driver.click("report_month:2026-10")
+
+    bot = context.bot
+    assert len(bot.documents) == 1
+    _, docx_bytes, filename, caption = bot.documents[0]
+    assert filename.startswith("reimbursement_2026-10")
+    assert docx_bytes[:2] == b"PK"
+
+    document = Document(io.BytesIO(docx_bytes))
+    text = "\n".join(p.text for p in document.paragraphs)
+    assert "Test User" in text
+    assert "Finance Officer" in text
+    table_text = "\n".join(
+        cell.text for row in document.tables[0].rows for cell in row.cells
+    )
+    assert "Travel" in table_text and "Purchases" in table_text
+    assert "Acme Corp" in table_text
+    assert "1,550.50" in table_text  # total
+
+    drive = context.application.bot_data["drive"]
+    assert any(u[2].endswith(".docx") for u in drive.uploads)
+
+
 async def test_bills_done_requires_a_file():
     driver = Driver(make_context())
     await driver.click("new")

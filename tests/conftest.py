@@ -76,6 +76,7 @@ class FakeSheets:
         }
         self.appended = []
         self.duplicate = False
+        self.report_rows = []
 
     def get_user(self, telegram_id):
         return {
@@ -97,6 +98,9 @@ class FakeSheets:
     def get_last_submissions(self, telegram_id, limit=5):
         return []
 
+    def get_submissions_for_month(self, telegram_id, month):
+        return self.report_rows
+
 
 class FakeDrive:
     def __init__(self):
@@ -108,12 +112,19 @@ class FakeDrive:
 
 
 class FakeBot:
+    def __init__(self):
+        self.documents = []
+
     async def get_file(self, file_id):
         async def dl(out):
             out.write(b"\xff\xd8fake-image")
         return SimpleNamespace(download_to_memory=dl)
 
     async def send_message(self, chat_id, text):
+        return None
+
+    async def send_document(self, chat_id, document, filename=None, caption=None):
+        self.documents.append((chat_id, document.getvalue(), filename, caption))
         return None
 
 
